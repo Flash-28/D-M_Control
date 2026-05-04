@@ -105,3 +105,7 @@ Each menu cycle redraws the screen with four sections:
 - 2-channel writes are deliberately per-speaker (one HTTP request each) to
   match the web UI's write pattern. The AVR silently ignores batched 2-ch
   payloads on some firmware revisions.
+- This script is provided as-is and I make no guarantees or warranties that it
+  will work for your reciever.  I have tested this on exactly ONE reciever, the
+  Denon X8500HA, so use at your own risk.
+- I recommend starting with a backup before making any changes.
