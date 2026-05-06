@@ -75,7 +75,10 @@ Both macros force:
 - Audyssey: **Off**
 - Master Volume: **-10 dB** (70 absolute)
 - 2-Channel Mode: **Manual, Large front, LFE (not LFE+Main), L/R at 0 dB / 0 ft**
-- All targeted speakers: **Level 0 dB, Distance 0 ft, Size Large** (non-sub)
+- All targeted speakers: **Level 0 dB, Distance 0 ft, Size Large**
+- Stereo mode is activated
+- ECO mode is set to Off
+- Subwoofer LPF for LFE is set to 250 Hz
 
 | Mode | Targets                                         |
 |------|-------------------------------------------------|

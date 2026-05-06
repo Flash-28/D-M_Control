@@ -12,6 +12,8 @@ class RecieverManager:
     def __init__(self, ip=None):
         self.ip = ip
         self.port_https = 10443
+        self.port_telnet = 23
+        self.telnet_timeout = 5.0
         self.context = ssl._create_unverified_context()
         self.headers = {
             "X-Requested-With": "XMLHttpRequest",
@@ -96,6 +98,60 @@ class RecieverManager:
             conn.request("GET", url, headers=headers)
             return conn.getresponse().status == 200
         except: return False
+
+    # --- TELNET (PORT 23) HELPERS ---
+    def _telnet_exchange(self, commands, post_send_wait=1.2):
+        """Open a port-23 session, send each command (with `post_send_wait`s
+        between sends), read response, and cleanly shut down + close the socket.
+        Returns response as a list of stripped lines."""
+        chunks = []
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(self.telnet_timeout)
+        try:
+            s.connect((self.ip, self.port_telnet))
+            time.sleep(0.3)
+            for cmd in commands:
+                s.sendall(cmd.encode("ascii") + b"\r")
+                time.sleep(post_send_wait)
+            try:
+                while True:
+                    data = s.recv(4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+            except socket.timeout:
+                pass
+        finally:
+            try: s.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+            s.close()
+        raw = b"".join(chunks).decode("ascii", errors="ignore")
+        return [ln.strip() for ln in raw.split("\r") if ln.strip()]
+
+    def _parse_surround_mode(self, lines):
+        """Extract the surround mode code from an MS? response (ignores MSV volume line)."""
+        for line in lines:
+            if line.startswith("MS") and len(line) > 2 and not line.startswith("MSV"):
+                return line[2:]
+        return None
+
+    def query_surround_mode(self):
+        """Query and return the current surround mode code, or None on failure."""
+        try:
+            return self._parse_surround_mode(self._telnet_exchange(["MS?"]))
+        except OSError:
+            return None
+
+    def set_surround_mode(self, mode_cmd):
+        """Send a mode-change command (e.g. 'MSSTEREO') and re-query in the same
+        session to confirm. Returns the new mode code, or None on failure."""
+        try:
+            # 2.0s after set so the AVR settles before we query.
+            lines = self._telnet_exchange([mode_cmd, "MS?"], post_send_wait=2.0)
+            return self._parse_surround_mode(lines)
+        except OSError as exc:
+            print(f"  [!] Telnet error setting surround mode: {exc}")
+            return None
 
     # --- VOLUME & MUTE ---
     def set_volume(self, val):
@@ -189,6 +245,18 @@ class RecieverManager:
         aud = self.get_https_xml("/ajax/audio/get_config?type=9", "audio")
         state['audio']['audyssey'] = aud.findtext(".//MultEQ") if aud is not None else "0"
 
+        # 5b. Surround Mode (Port 23 Telnet, MS? -> e.g. 'STEREO', 'DIRECT', 'MOVIE')
+        state['audio']['surround_mode'] = self.query_surround_mode()
+
+        # 5c. ECO Mode (10443 general type 3): 1=On, 2=Auto, 3=Off
+        # Response shape: <ECO><Mode display="3">2</Mode>...</ECO>
+        eco = self.get_https_xml("/ajax/general/get_config?type=3", "general")
+        state['audio']['eco'] = (eco.findtext("Mode") or "0").strip() if eco is not None else "0"
+
+        # 5d. Subwoofer LPF for LFE (10443 speakers type 7), e.g. <LPFforLFE>120</LPFforLFE>
+        lpf = self.get_https_xml("/ajax/speakers/get_config?type=7", "speakers")
+        state['audio']['lpf_lfe'] = (lpf.findtext(".//LPFforLFE") or "120").strip() if lpf is not None else "120"
+
         # 6. 2-Channel Playback (10443 speakers type 9): Setting (1=Auto/2=Manual),
         #    Front (2=Small/3=Large), SubwooferMode (1=LFE/2=LFE+Main). Also
         #    capture L/R distance (cm) and level (dB) from DistanceList/LevelList
@@ -268,7 +336,13 @@ class RecieverManager:
         mute_state = (a.get('mute') or 'off').upper()
         mute_display = "[ MUTED ]" if mute_state == "ON" else "off"
 #        print(f" SOURCE: {a.get('display_name')} ({a.get('raw_input')}) | MUTE: {mute_display}")
-        print(f" SOURCE: {a.get('display_name')} ({a.get('raw_input')})")
+        eco_modes = {"1": "On", "2": "Auto", "3": "Off"}
+        eco_lbl = eco_modes.get(a.get('eco'), "Unknown")
+        print(f" SOURCE: {a.get('display_name')} ({a.get('raw_input')}) | ECO: {eco_lbl}")
+        surround_code = a.get('surround_mode') or ''
+        surround_label = {"DIRECT": "Direct", "PURE DIRECT": "Pure Direct",
+                          "STEREO": "Stereo"}.get(surround_code, surround_code or "Unknown")
+        print(f" SURROUND: {surround_label}")
         print("-" * 54)
 
         rows = []
@@ -293,8 +367,11 @@ class RecieverManager:
                 m = float(data.get('dst_raw', 0))/100
                 dst = f"{m*3.28084:.1f} ft"
 
-            # Crossover: — when no crossover index (e.g. subs)
-            if ids.get('xo') is None:
+            # Crossover: subs show LPF for LFE; others show their per-speaker xover
+            if name.startswith("Subwoofer"):
+                lpf = a.get('lpf_lfe')
+                xo = f"{lpf} Hz" if lpf else "—"
+            elif ids.get('xo') is None:
                 xo = "—"
             else:
                 xo = f"{data.get('xo_raw')} Hz" if data.get('xo_raw') else "N/A"
@@ -418,6 +495,31 @@ class RecieverManager:
             print(f"  [~] Audyssey: {current['audio'].get('audyssey')} -> {backup['audio']['audyssey']}")
             changes += 1
 
+        # Surround Mode (telnet MS<code>)
+        backup_mode  = backup['audio'].get('surround_mode')
+        current_mode = current['audio'].get('surround_mode')
+        if backup_mode and backup_mode != current_mode:
+            self.set_surround_mode(f"MS{backup_mode}")
+            print(f"  [~] Surround Mode: {current_mode} -> {backup_mode}")
+            changes += 1
+
+        # ECO Mode (10443 general type 3): 1=On, 2=Auto, 3=Off
+        backup_eco  = backup['audio'].get('eco')
+        current_eco = current['audio'].get('eco')
+        if backup_eco and backup_eco != current_eco:
+            self.set_config_https("3", f"<Mode>{backup_eco}</Mode>", "general")
+            eco_lbl = {"1": "On", "2": "Auto", "3": "Off"}
+            print(f"  [~] ECO: {eco_lbl.get(current_eco, current_eco)} -> {eco_lbl.get(backup_eco, backup_eco)}")
+            changes += 1
+
+        # Subwoofer LPF for LFE (10443 speakers type 7), e.g. 80..250 Hz
+        backup_lpf  = backup['audio'].get('lpf_lfe')
+        current_lpf = current['audio'].get('lpf_lfe')
+        if backup_lpf and backup_lpf != current_lpf:
+            self.set_config_https("7", f"<LPFforLFE>{backup_lpf}</LPFforLFE>", "speakers")
+            print(f"  [~] Sub LPF: {current_lpf} -> {backup_lpf} Hz")
+            changes += 1
+
         # 2-Channel Playback. Front, SubwooferMode, and L/R distance/level are
         # read-only while Setting=Auto, so enter Manual first if any of those
         # need to change, apply them, then set final Setting last (which may
@@ -538,6 +640,20 @@ class RecieverManager:
 
         state['speakers'] = {n: state['speakers'][n] for n in target_names}
         self.apply_state(state)
+
+        print("  [+] Activating Stereo mode for calibration...")
+        confirmed = self.set_surround_mode("MSSTEREO")
+        if confirmed == "STEREO":
+            print("  [+] Stereo mode confirmed active.")
+        else:
+            print(f"  [!] Stereo mode may not have set correctly (got: {confirmed})")
+
+        print("  [+] Forcing ECO mode Off for calibration...")
+        self.set_config_https("3", "<Mode>3</Mode>", "general")
+
+        print("  [+] Setting Subwoofer LPF for LFE to 250 Hz for calibration...")
+        self.set_config_https("7", "<LPFforLFE>250</LPFforLFE>", "speakers")
+
         print("  [+] Calibration environment ready.")
 
 def main():
