@@ -13,6 +13,9 @@ measurement / tuning sessions.
 - Power (Main Zone)
 - Master Volume (dB or absolute scale, 0.5 dB steps)
 - Audyssey mode (Reference / L-C-R Bypass / Flat / Off)
+- Surround mode (Stereo / Direct / Movie / Game / Music / Auro3D)
+- ECO mode (On / Auto / Off)
+- Subwoofer LPF for LFE (250 Hz)
 - Per-speaker Size, Level, Distance, Crossover (all 13.2 channels)
 - 2-Channel Playback: Setting (Auto/Manual), Front size, Subwoofer Mode
   (LFE / LFE+Main), Front L/R Distance, Front L/R Level
@@ -92,7 +95,7 @@ Use the matching `r` (Restore) afterward to return to your saved configuration.
 Each menu cycle redraws the screen with four sections:
 
 1. **Header**: model, IP, power state (green/red)
-2. **Status**: Audyssey, Volume, Source, Mute
+2. **Status**: Audyssey, Volume, Source, Eco, Surround
 3. **Speakers table**: Size / Level / Distance / Crossover for every configured channel
 4. **2-Channel Mode table**: Front L and Front R with Size / Level / Distance / Crossover,
    plus the current Setting and SW Mode on the header line
