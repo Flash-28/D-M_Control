@@ -253,7 +253,7 @@ class RecieverManager:
 
         # 5d. Subwoofer LPF for LFE (10443 speakers type 7), e.g. <LPFforLFE>120</LPFforLFE>
         lpf = self.get_https_xml("/ajax/speakers/get_config?type=7", "speakers")
-        state['audio']['lpf_lfe'] = (lpf.findtext(".//LPFforLFE") or "120").strip() if lpf is not None else "120"
+        state['audio']['lpf_lfe'] = (lpf.findtext(".//LPFforLFE") or "0").strip() if lpf is not None else "0"
 
         # 5e. Auto Lip Sync (10443 audio type 6): 1=On, 2=Off
         lipsync = self.get_https_xml("/ajax/audio/get_config?type=6", "audio")
