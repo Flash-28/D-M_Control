@@ -13,7 +13,9 @@ class RecieverManager:
         self.ip = ip
         self.port_https = 10443
         self.port_telnet = 23
-        self.telnet_timeout = 5.0
+        self.telnet_recv_timeout = 0.4    # per-recv() poll interval
+        self.telnet_max_wait    = 1.5     # overall deadline for a query
+        self.telnet_set_wait    = 3.0     # overall deadline when also sending a set
         self.context = ssl._create_unverified_context()
         self.headers = {
             "X-Requested-With": "XMLHttpRequest",
@@ -98,33 +100,48 @@ class RecieverManager:
         except: return False
 
     # --- TELNET (PORT 23) HELPERS ---
-    def _telnet_exchange(self, commands, post_send_wait=1.2):
-        """Open a port-23 session, send each command (with `post_send_wait`s
-        between sends), read response, and cleanly shut down + close the socket.
-        Returns response as a list of stripped lines."""
-        chunks = []
+    def _telnet_exchange(self, commands, expect_prefix=None, exclude_prefix=None,
+                         max_wait=None, inter_cmd_wait=0.05):
+        """Open a port-23 session, send each command, read until either a line
+        matching `expect_prefix` (and not `exclude_prefix`) arrives or `max_wait`
+        seconds elapse, then cleanly shut down + close the socket. Returns the
+        accumulated response as a list of stripped lines.
+
+        Early-exits the recv loop as soon as the expected line shows up so we
+        don't pay the full per-recv timeout for every call."""
+        if max_wait is None:
+            max_wait = self.telnet_max_wait
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(self.telnet_timeout)
+        s.settimeout(self.telnet_recv_timeout)
+        buf = b""
         try:
             s.connect((self.ip, self.port_telnet))
-            time.sleep(0.3)
-            for cmd in commands:
+            for i, cmd in enumerate(commands):
+                if i and inter_cmd_wait:
+                    time.sleep(inter_cmd_wait)
                 s.sendall(cmd.encode("ascii") + b"\r")
-                time.sleep(post_send_wait)
-            try:
-                while True:
+            deadline = time.monotonic() + max_wait
+            while time.monotonic() < deadline:
+                try:
                     data = s.recv(4096)
-                    if not data:
-                        break
-                    chunks.append(data)
-            except socket.timeout:
-                pass
+                except socket.timeout:
+                    continue
+                if not data:
+                    break
+                buf += data
+                if expect_prefix and b"\r" in buf:
+                    for ln in buf.decode("ascii", errors="ignore").split("\r"):
+                        ln = ln.strip()
+                        if ln.startswith(expect_prefix) and (
+                                not exclude_prefix or not ln.startswith(exclude_prefix)):
+                            return [l.strip() for l in
+                                    buf.decode("ascii", errors="ignore").split("\r")
+                                    if l.strip()]
         finally:
             try: s.shutdown(socket.SHUT_RDWR)
             except OSError: pass
             s.close()
-        raw = b"".join(chunks).decode("ascii", errors="ignore")
-        return [ln.strip() for ln in raw.split("\r") if ln.strip()]
+        return [ln.strip() for ln in buf.decode("ascii", errors="ignore").split("\r") if ln.strip()]
 
     def _parse_surround_mode(self, lines):
         """Extract the surround mode code from an MS? response (ignores MSV volume line)."""
@@ -136,7 +153,8 @@ class RecieverManager:
     def query_surround_mode(self):
         """Query and return the current surround mode code, or None on failure."""
         try:
-            return self._parse_surround_mode(self._telnet_exchange(["MS?"]))
+            lines = self._telnet_exchange(["MS?"], expect_prefix="MS", exclude_prefix="MSV")
+            return self._parse_surround_mode(lines)
         except OSError:
             return None
 
@@ -144,8 +162,10 @@ class RecieverManager:
         """Send a mode-change command (e.g. 'MSSTEREO') and re-query in the same
         session to confirm. Returns the new mode code, or None on failure."""
         try:
-            # 2.0s after set so the AVR settles before we query.
-            lines = self._telnet_exchange([mode_cmd, "MS?"], post_send_wait=2.0)
+            lines = self._telnet_exchange([mode_cmd, "MS?"], expect_prefix="MS",
+                                          exclude_prefix="MSV",
+                                          max_wait=self.telnet_set_wait,
+                                          inter_cmd_wait=0.2)
             return self._parse_surround_mode(lines)
         except OSError as exc:
             print(f"  [!] Telnet error setting surround mode: {exc}")
