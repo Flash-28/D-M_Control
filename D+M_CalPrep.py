@@ -1,12 +1,50 @@
 import socket
 import http.client
 import ssl
-from sys import platform
+import platform
 import time
 import os
 import json
 import urllib.parse
 import xml.etree.ElementTree as ET
+
+
+def _enable_windows_ansi():
+    """Turn on Virtual Terminal Processing on the Windows console so that the
+    ANSI escape sequences (\\033[...m) used in the UI render as bold/color
+    instead of literal text. No-op on non-Windows hosts. Safe to call more than
+    once."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+    except Exception:
+        pass
+
+
+def _build_user_agent():
+    """Compose a browser-ish User-Agent string that reflects the host actually
+    running the script (macOS/Windows/Linux/other). The AVR does not validate
+    UA, but accurate values make request logs on the receiver readable."""
+    sysname = platform.system()
+    if sysname == "Darwin":
+        mac = platform.mac_ver()[0] or "10.15.7"
+        os_token = f"Macintosh; Intel Mac OS X {mac.replace('.', '_')}"
+    elif sysname == "Windows":
+        rel = platform.release() or "10"
+        arch = "Win64; x64" if platform.machine().endswith("64") else "Win32"
+        os_token = f"Windows NT {rel}; {arch}"
+    elif sysname == "Linux":
+        os_token = f"X11; Linux {platform.machine() or 'x86_64'}"
+    else:
+        os_token = f"{sysname or 'Unknown'} {platform.release() or ''}".strip()
+    return f"Mozilla/5.0 ({os_token})"
+
 
 class RecieverManager:
     def __init__(self, ip=None):
@@ -20,7 +58,7 @@ class RecieverManager:
         self.headers = {
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "text/plain, */*; q=0.01",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+            "User-Agent": _build_user_agent()
         }
 
         self.INDEX_MAP = {
@@ -692,6 +730,7 @@ class RecieverManager:
         print("  [+] Calibration environment ready.")
 
 def main():
+    _enable_windows_ansi()
     mgr = RecieverManager()
     if not mgr.discover():
         ip = input("AVR not found. Enter IP: ").strip()
@@ -710,13 +749,13 @@ def main():
         choice = input("\nChoice: ").strip().lower()
 
         if choice == 'b':
-            with open("avr_backup.json", "w") as f:
+            with open("avr_backup.json", "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=4)
             print("[+] Backup saved to avr_backup.json")
             time.sleep(2)
         elif choice == 'r':
             if os.path.exists("avr_backup.json"):
-                with open("avr_backup.json", "r") as f:
+                with open("avr_backup.json", "r", encoding="utf-8") as f:
                     backup = json.load(f)
                 current = mgr.ensure_power_on(mgr.fetch_full_state())
                 mgr.apply_diff(backup, current)
